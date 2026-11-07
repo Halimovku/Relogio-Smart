@@ -1,0 +1,1142 @@
+#!/usr/bin/env python3
+
+
+import json
+import math
+import sys
+import time
+from datetime import date, datetime, timedelta
+from getpass import getuser
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
+
+from PySide6.QtCore import QDate, QLocale, QObject, QPointF, QRectF, QTime, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF, QTextCharFormat
+from PySide6.QtWidgets import (
+    QAbstractItemView, QApplication, QCalendarWidget, QComboBox, QDialog, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
+    QProgressBar, QPushButton, QSpinBox, QTabWidget, QTableWidget, QTableWidgetItem,
+    QTimeEdit, QVBoxLayout, QWidget,
+)
+
+APP_DIR = Path.home() / ".relogio_t100"
+CONFIG_FILE = APP_DIR / "config.json"
+
+COR_TEXTO = "#e6edf3"
+COR_MUTED = "#8b98a9"
+COR_VERMELHO = "#f25f5c"
+COR_FERIADO = "#ff7b72"
+
+DIAS_SEMANA = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
+               "sexta-feira", "sábado", "domingo"]
+DIAS_CURTOS = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
+MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
+         "agosto", "setembro", "outubro", "novembro", "dezembro"]
+REPETICOES = {"uma_vez": "Uma vez", "diario": "Todos os dias", "uteis": "Dias úteis"}
+
+CONFIG_PADRAO = {
+    "fusos": ["America/New_York", "Europe/London", "Europe/Lisbon",
+              "Asia/Tokyo", "Australia/Sydney"],
+    "alarmes": [],
+    "pomodoro": {"trabalho": 25, "pausa": 5, "pausa_longa": 15, "ciclos": 4},
+}
+
+FERIADOS_FIXOS = {
+    (1, 1): "Confraternização Universal",
+    (4, 21): "Tiradentes",
+    (5, 1): "Dia do Trabalho",
+    (9, 7): "Independência do Brasil",
+    (10, 12): "Nossa Senhora Aparecida",
+    (11, 2): "Finados",
+    (11, 15): "Proclamação da República",
+    (11, 20): "Dia Nacional de Zumbi e da Consciência Negra",
+    (12, 25): "Natal",
+}
+
+QSS = """
+QWidget { background-color: #0b0f14; color: #e6edf3;
+          font-family: "Segoe UI", "Ubuntu", "Helvetica Neue", sans-serif; font-size: 10pt; }
+QLabel { background: transparent; }
+QTabWidget::pane { border: 1px solid #1f2937; border-radius: 12px; background-color: #0d1117; }
+QTabBar::tab { background: #111827; color: #8b98a9; padding: 10px 18px; margin: 4px 3px; border-radius: 10px; }
+QTabBar::tab:selected { background: #1f6feb; color: #ffffff; }
+QTabBar::tab:hover:!selected { background: #1c2533; color: #e6edf3; }
+QPushButton { background-color: #1f2937; border: 1px solid #30363d; border-radius: 8px; padding: 7px 14px; }
+QPushButton:hover { background-color: #263449; }
+QPushButton:pressed { background-color: #1f6feb; }
+QPushButton#primario { background-color: #1f6feb; border: none; color: #ffffff; font-weight: bold; }
+QPushButton#primario:hover { background-color: #388bfd; }
+QLineEdit, QComboBox, QSpinBox, QTimeEdit {
+    background-color: #111827; border: 1px solid #30363d; border-radius: 8px; padding: 6px 8px; }
+QComboBox QAbstractItemView { background-color: #111827; selection-background-color: #1f6feb; }
+QListWidget, QTableWidget { background-color: #0d1117; border: 1px solid #1f2937; border-radius: 10px;
+                            alternate-background-color: #111827; }
+QListWidget::item { padding: 8px; }
+QListWidget::item:selected, QTableWidget::item:selected { background-color: #1f6feb; color: #ffffff; }
+QHeaderView::section { background-color: #111827; color: #8b98a9; border: none; padding: 8px; font-weight: bold; }
+QProgressBar { background-color: #111827; border: none; border-radius: 8px; text-align: center; color: #e6edf3; }
+QProgressBar::chunk { background-color: #2ea043; border-radius: 8px; }
+QCalendarWidget QWidget#qt_calendar_navigationbar { background-color: #111827; }
+QCalendarWidget QToolButton { background-color: #1f2937; color: #e6edf3; border-radius: 6px; padding: 4px 10px; }
+QCalendarWidget QSpinBox { background-color: #111827; color: #e6edf3; }
+QCalendarWidget QAbstractItemView:enabled { background-color: #0d1117; color: #e6edf3;
+                                            selection-background-color: #1f6feb; selection-color: #ffffff; }
+QCalendarWidget QAbstractItemView:disabled { color: #4b5563; }
+QScrollBar:vertical { background: #0d1117; width: 10px; }
+QScrollBar::handle:vertical { background: #30363d; border-radius: 5px; min-height: 30px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QStatusBar { color: #8b98a9; }
+QToolTip { background-color: #111827; color: #e6edf3; border: 1px solid #30363d; }
+"""
+
+def carregar_config() -> dict:
+    cfg = json.loads(json.dumps(CONFIG_PADRAO))  # cópia profunda
+    try:
+        salvo = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        for chave in cfg:
+            if chave in salvo:
+                cfg[chave] = salvo[chave]
+    except (OSError, ValueError, TypeError):
+        pass  # primeiro uso ou arquivo corrompido: usa os padrões
+    return cfg
+
+
+def salvar_config(cfg: dict) -> None:
+    try:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as erro:
+        print(f"[aviso] não consegui salvar a configuração: {erro}", file=sys.stderr)
+
+
+def nome_usuario() -> str:
+    try:
+        return getuser().capitalize()
+    except Exception:
+        return ""
+
+
+def formata_hms(segundos: float) -> str:
+    s = int(math.ceil(max(0.0, segundos)))
+    h, resto = divmod(s, 3600)
+    m, s = divmod(resto, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def formata_cronometro(segundos: float) -> str:
+    cs = int(max(0.0, segundos) * 100)
+    h, resto = divmod(cs, 360_000)
+    m, resto = divmod(resto, 6_000)
+    s, c = divmod(resto, 100)
+    if h:
+        return f"{h:02d}:{m:02d}:{s:02d}.{c:02d}"
+    return f"{m:02d}:{s:02d}.{c:02d}"
+
+
+def pascoa(ano: int) -> date:
+    """Domingo de Páscoa (algoritmo de Meeus/Jones/Butcher)."""
+    a = ano % 19
+    b, c = divmod(ano, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    j = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * j) // 451
+    mes, dia = divmod(h + j - 7 * m + 114, 31)
+    return date(ano, mes, dia + 1)
+
+
+def feriados_nacionais(ano: int) -> dict[date, str]:
+    pas = pascoa(ano)
+    feriados = {date(ano, m, d): nome for (m, d), nome in FERIADOS_FIXOS.items()}
+    feriados[pas - timedelta(days=2)] = "Sexta-feira Santa"
+    feriados[pas - timedelta(days=47)] = "Carnaval (ponto facultativo)"
+    feriados[pas + timedelta(days=60)] = "Corpus Christi (ponto facultativo)"
+    return feriados
+
+
+def proximo_feriado(hoje: date) -> tuple[str, date]:
+    for ano in (hoje.year, hoje.year + 1):
+        for dia, nome in sorted(feriados_nacionais(ano).items()):
+            if dia >= hoje:
+                return nome, dia
+    return "—", hoje
+
+
+def caneta(cor, largura: float = 1.0, cap=Qt.PenCapStyle.FlatCap) -> QPen:
+    pincel = QPen(QColor(cor))
+    pincel.setWidthF(largura)
+    pincel.setCapStyle(cap)
+    return pincel
+
+
+class Pulso(QObject):
+    """Emite a hora atual ~10 vezes por segundo. Todas as abas se inscrevem aqui."""
+
+    tick = Signal(object)
+
+    def __init__(self):
+        super().__init__()
+        self._timer = QTimer(self)
+        self._timer.setInterval(100)
+        self._timer.timeout.connect(self._emitir)
+        self._timer.start()
+
+    def _emitir(self):
+        self.tick.emit(datetime.now())
+
+
+_ABERTOS: list[QDialog] = []
+
+
+def abrir_dialogo(dlg: QDialog) -> None:
+    _ABERTOS.append(dlg)
+
+    def fechar(_=None):
+        if dlg in _ABERTOS:
+            _ABERTOS.remove(dlg)
+        dlg.deleteLater()
+
+    dlg.finished.connect(fechar)
+    dlg.show()
+    dlg.raise_()
+    dlg.activateWindow()
+
+
+class DialogoAlarme(QDialog):
+    soneca_pedida = Signal()
+
+    def __init__(self, titulo: str, mensagem: str, com_soneca: bool = True, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(titulo)
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
+        self.setMinimumWidth(340)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 20)
+        layout.setSpacing(14)
+
+        icone = QLabel("⏰")
+        icone.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icone.setStyleSheet("font-size: 44pt;")
+
+        texto = QLabel(mensagem)
+        texto.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fonte = QFont("Segoe UI", 15)
+        fonte.setBold(True)
+        texto.setFont(fonte)
+
+        layout.addWidget(icone)
+        layout.addWidget(texto)
+
+        botoes = QHBoxLayout()
+        if com_soneca:
+            btn_soneca = QPushButton("Soneca")
+            btn_soneca.clicked.connect(self._pedir_soneca)
+            botoes.addWidget(btn_soneca)
+        btn_ok = QPushButton("Desligar" if com_soneca else "OK")
+        btn_ok.setObjectName("primario")
+        btn_ok.clicked.connect(self.accept)
+        botoes.addWidget(btn_ok)
+        layout.addLayout(botoes)
+
+        # Bipe a cada 1,2 s por até 60 s
+        self._beep = QTimer(self)
+        self._beep.setInterval(1200)
+        self._beep.timeout.connect(lambda: QApplication.beep())
+        self._beep.start()
+        self._limite = QTimer(self)
+        self._limite.setSingleShot(True)
+        self._limite.timeout.connect(self._beep.stop)
+        self._limite.start(60_000)
+        QApplication.beep()
+
+    def _pedir_soneca(self):
+        self.soneca_pedida.emit()
+        self.accept()
+
+    def done(self, resultado):
+        self._beep.stop()
+        super().done(resultado)
+
+class RelogioAnalogico(QWidget):
+    def __init__(self):
+        super().__init__()
+        self._agora = datetime.now()
+        self.setMinimumSize(260, 260)
+
+    def atualizar(self, agora: datetime):
+        self._agora = agora
+        self.update()
+
+    def paintEvent(self, _evento):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        lado = min(self.width(), self.height())
+        p.translate(self.width() / 2, self.height() / 2)
+        p.scale(lado / 240, lado / 240)
+
+        ag = self._agora
+        seg = ag.second + ag.microsecond / 1_000_000
+
+        # Mostrador
+        p.setPen(caneta("#2a3342", 2))
+        p.setBrush(QColor("#0d1117"))
+        p.drawEllipse(QPointF(0, 0), 116, 116)
+
+        # Anel de progresso dos segundos
+        p.setPen(caneta(COR_VERMELHO, 3, Qt.PenCapStyle.RoundCap))
+        p.drawArc(QRectF(-108, -108, 216, 216), 90 * 16, -int(seg / 60 * 360 * 16))
+
+        # Marcas de minuto e de hora
+        for i in range(60):
+            p.save()
+            p.rotate(i * 6)
+            if i % 5 == 0:
+                p.setPen(caneta(COR_TEXTO, 3.5, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(0, -100), QPointF(0, -88))
+            else:
+                p.setPen(caneta("#3b4656", 1.2))
+                p.drawLine(QPointF(0, -100), QPointF(0, -95))
+            p.restore()
+
+        # Algarismos
+        fonte = QFont("Segoe UI", 13)
+        fonte.setBold(True)
+        p.setFont(fonte)
+        p.setPen(QColor(COR_TEXTO))
+        for n in range(1, 13):
+            ang = math.radians(n * 30)
+            x, y = math.sin(ang) * 72, -math.cos(ang) * 72
+            p.drawText(QRectF(x - 20, y - 14, 40, 28), Qt.AlignmentFlag.AlignCenter, str(n))
+
+        # Ponteiros
+        self._ponteiro(p, (ag.hour % 12 + ag.minute / 60 + seg / 3600) * 30, 54, 7, QColor(COR_TEXTO))
+        self._ponteiro(p, (ag.minute + seg / 60) * 6, 84, 4.5, QColor(COR_TEXTO))
+
+        p.save()
+        p.rotate(seg * 6)
+        p.setPen(caneta(COR_VERMELHO, 1.6, Qt.PenCapStyle.RoundCap))
+        p.drawLine(QPointF(0, 16), QPointF(0, -94))
+        p.restore()
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(COR_VERMELHO))
+        p.drawEllipse(QPointF(0, 0), 5, 5)
+        p.end()
+
+    @staticmethod
+    def _ponteiro(p: QPainter, angulo: float, comprimento: float, largura: float, cor: QColor):
+        p.save()
+        p.rotate(angulo)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(cor)
+        pontos = [
+            QPointF(-largura, 12),
+            QPointF(-largura, -comprimento + largura * 2),
+            QPointF(0, -comprimento),
+            QPointF(largura, -comprimento + largura * 2),
+            QPointF(largura, 12),
+        ]
+        p.drawPolygon(QPolygonF(pontos))
+        p.restore()
+
+
+class AbaRelogio(QWidget):
+    def __init__(self, pulso: Pulso):
+        super().__init__()
+        self._usuario = nome_usuario()
+
+        raiz = QHBoxLayout(self)
+        raiz.setContentsMargins(36, 24, 36, 24)
+        raiz.setSpacing(40)
+
+        self.analogico = RelogioAnalogico()
+        raiz.addWidget(self.analogico, 5)
+
+        painel = QVBoxLayout()
+        painel.setSpacing(8)
+
+        self.saudacao = QLabel()
+        self.saudacao.setStyleSheet(f"color: {COR_MUTED}; font-size: 13pt;")
+
+        self.digital = QLabel("00:00:00")
+        fonte = QFont("Consolas", 66)
+        fonte.setBold(True)
+        self.digital.setFont(fonte)
+
+        self.data = QLabel()
+        self.data.setStyleSheet("font-size: 17pt;")
+
+        self.progresso = QProgressBar()
+        self.progresso.setRange(0, 1000)
+        self.progresso.setFormat("Dia %p% concluído")
+
+        self.info = QLabel()
+        self.info.setStyleSheet(f"color: {COR_MUTED};")
+        self.info.setWordWrap(True)
+
+        painel.addStretch(1)
+        painel.addWidget(self.saudacao)
+        painel.addWidget(self.digital)
+        painel.addWidget(self.data)
+        painel.addSpacing(12)
+        painel.addWidget(self.progresso)
+        painel.addWidget(self.info)
+        painel.addStretch(1)
+        raiz.addLayout(painel, 6)
+
+        pulso.tick.connect(self._on_tick)
+        self._on_tick(datetime.now())
+
+    def _on_tick(self, agora: datetime):
+        self.analogico.atualizar(agora)
+        hoje = agora.date()
+
+        h = agora.hour
+        if 5 <= h < 12:
+            saud = "Bom dia"
+        elif 12 <= h < 18:
+            saud = "Boa tarde"
+        else:
+            saud = "Boa noite"
+        self.saudacao.setText(f"{saud}, {self._usuario}!" if self._usuario else f"{saud}!")
+
+        self.digital.setText(agora.strftime("%H:%M:%S"))
+        self.data.setText(
+            f"{DIAS_SEMANA[agora.weekday()].capitalize()}, {agora.day} de "
+            f"{MESES[agora.month - 1]} de {agora.year}"
+        )
+
+        segundos_dia = agora.hour * 3600 + agora.minute * 60 + agora.second + agora.microsecond / 1e6
+        self.progresso.setValue(int(segundos_dia / 86400 * 1000))
+
+        fim_do_ano = (date(agora.year, 12, 31) - hoje).days
+        nome_fer, data_fer = proximo_feriado(hoje)
+        faltam = (data_fer - hoje).days
+        quando = "hoje" if faltam == 0 else f"em {faltam} dia{'s' if faltam != 1 else ''}"
+        self.info.setText(
+            f"Dia {agora.timetuple().tm_yday} do ano  •  semana ISO {agora.isocalendar().week}  •  "
+            f"faltam {fim_do_ano} dias para o fim de {agora.year}\n"
+            f"Próximo feriado: {nome_fer} ({data_fer:%d/%m}), {quando}"
+        )
+
+
+class AbaMundo(QWidget):
+    COLUNAS = ["Cidade", "Fuso", "Hora", "Data", "Diferença vs. este PC"]
+
+    def __init__(self, pulso: Pulso, cfg: dict):
+        super().__init__()
+        self.cfg = cfg
+        self._zonas_disponiveis = set(available_timezones())
+        self._zonas: list = []  # ZoneInfo ou None (fuso inválido), na ordem da tabela
+
+        raiz = QVBoxLayout(self)
+        raiz.setContentsMargins(30, 24, 30, 24)
+        raiz.setSpacing(14)
+
+        topo = QHBoxLayout()
+        self.combo = QComboBox()
+        self.combo.setEditable(True)
+        self.combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.combo.addItems(sorted(self._zonas_disponiveis))
+        self.combo.setMaxVisibleItems(18)
+        completer = self.combo.completer()
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.combo.setCurrentIndex(self.combo.findText("America/Sao_Paulo"))
+        self.combo.lineEdit().returnPressed.connect(self._adicionar)
+
+        btn_add = QPushButton("Adicionar fuso")
+        btn_add.setObjectName("primario")
+        btn_add.clicked.connect(self._adicionar)
+        btn_del = QPushButton("Remover selecionado")
+        btn_del.clicked.connect(self._remover)
+
+        topo.addWidget(QLabel("Cidade / fuso:"))
+        topo.addWidget(self.combo, 1)
+        topo.addWidget(btn_add)
+        topo.addWidget(btn_del)
+        raiz.addLayout(topo)
+
+        self.tabela = QTableWidget(0, len(self.COLUNAS))
+        self.tabela.setHorizontalHeaderLabels(self.COLUNAS)
+        self.tabela.verticalHeader().setVisible(False)
+        self.tabela.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tabela.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tabela.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tabela.setAlternatingRowColors(True)
+        self.tabela.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        raiz.addWidget(self.tabela, 1)
+
+        self.aviso = QLabel("")
+        self.aviso.setStyleSheet(f"color: {COR_MUTED};")
+        raiz.addWidget(self.aviso)
+
+        self._recarregar()
+        pulso.tick.connect(self._on_tick)
+
+    def _recarregar(self):
+        self._zonas = []
+        self.tabela.setRowCount(0)
+        for linha, nome in enumerate(self.cfg["fusos"]):
+            self.tabela.insertRow(linha)
+            cidade = nome.split("/")[-1].replace("_", " ")
+            for col, texto in enumerate((cidade, nome, "", "", "")):
+                self.tabela.setItem(linha, col, QTableWidgetItem(texto))
+            try:
+                self._zonas.append(ZoneInfo(nome))
+            except (ZoneInfoNotFoundError, ValueError):
+                self._zonas.append(None)
+        self._on_tick(datetime.now())
+
+    def _texto(self, linha: int, col: int, texto: str):
+        item = self.tabela.item(linha, col)
+        if item is not None and item.text() != texto:
+            item.setText(texto)
+
+    def _on_tick(self, agora: datetime):
+        local = agora.astimezone()
+        for linha, zona in enumerate(self._zonas):
+            if zona is None:
+                self._texto(linha, 2, "fuso inválido")
+                continue
+            t = local.astimezone(zona)
+            dif = (t.utcoffset() - local.utcoffset()).total_seconds() / 3600
+            self._texto(linha, 2, t.strftime("%H:%M:%S"))
+            self._texto(linha, 3, t.strftime("%d/%m/%Y"))
+            self._texto(linha, 4, "mesmo horário" if dif == 0 else f"{dif:+g} h")
+
+    def _adicionar(self):
+        nome = self.combo.currentText().strip()
+        if nome not in self._zonas_disponiveis:
+            self.aviso.setText(f"Fuso não encontrado: “{nome}”. Tente digitar parte do nome (ex.: Tokyo).")
+            return
+        if nome in self.cfg["fusos"]:
+            self.aviso.setText("Esse fuso já está na lista.")
+            return
+        self.cfg["fusos"].append(nome)
+        salvar_config(self.cfg)
+        self.aviso.setText(f"Adicionado: {nome}")
+        self._recarregar()
+
+    def _remover(self):
+        linha = self.tabela.currentRow()
+        if not 0 <= linha < len(self.cfg["fusos"]):
+            self.aviso.setText("Selecione uma linha para remover.")
+            return
+        removido = self.cfg["fusos"].pop(linha)
+        salvar_config(self.cfg)
+        self.aviso.setText(f"Removido: {removido}")
+        self._recarregar()
+
+
+class AbaAlarmes(QWidget):
+    def __init__(self, pulso: Pulso, cfg: dict):
+        super().__init__()
+        self.cfg = cfg
+        self._sonecas: list[tuple[datetime, str]] = []
+        self._ultimo_minuto = ""
+        self._reconstruindo = False
+
+        raiz = QVBoxLayout(self)
+        raiz.setContentsMargins(30, 24, 30, 24)
+        raiz.setSpacing(14)
+
+        form = QHBoxLayout()
+        self.hora = QTimeEdit(QTime(7, 0))
+        self.hora.setDisplayFormat("HH:mm")
+        self.hora.setFixedWidth(110)
+        self.rotulo = QLineEdit()
+        self.rotulo.setPlaceholderText("Rótulo (ex.: Academia, Reunião)")
+        self.repeticao = QComboBox()
+        for chave, texto in REPETICOES.items():
+            self.repeticao.addItem(texto, chave)
+        self.repeticao.setCurrentIndex(1)
+        self.soneca = QSpinBox()
+        self.soneca.setRange(1, 60)
+        self.soneca.setValue(5)
+        self.soneca.setSuffix(" min de soneca")
+        btn_add = QPushButton("Adicionar alarme")
+        btn_add.setObjectName("primario")
+        btn_add.clicked.connect(self._adicionar)
+
+        form.addWidget(QLabel("Horário"))
+        form.addWidget(self.hora)
+        form.addWidget(self.rotulo, 1)
+        form.addWidget(self.repeticao)
+        form.addWidget(self.soneca)
+        form.addWidget(btn_add)
+
+        self.lista = QListWidget()
+        self.lista.itemChanged.connect(self._item_mudou)
+
+        acoes = QHBoxLayout()
+        btn_teste = QPushButton("Testar alarme")
+        btn_teste.clicked.connect(lambda _=False: self._disparar("Teste de alarme", datetime.now().strftime("%H:%M")))
+        btn_del = QPushButton("Remover selecionado")
+        btn_del.clicked.connect(self._remover)
+        acoes.addWidget(btn_teste)
+        acoes.addStretch(1)
+        acoes.addWidget(btn_del)
+
+        dica = QLabel("Marque ou desmarque para ativar/desativar. Alarmes “uma vez” desligam sozinhos depois de tocar.")
+        dica.setStyleSheet(f"color: {COR_MUTED};")
+
+        raiz.addLayout(form)
+        raiz.addWidget(self.lista, 1)
+        raiz.addLayout(acoes)
+        raiz.addWidget(dica)
+
+        self._recarregar()
+        pulso.tick.connect(self._on_tick)
+
+    def _recarregar(self):
+        self._reconstruindo = True
+        self.lista.clear()
+        for al in self.cfg["alarmes"]:
+            nome = al["rotulo"] or "Alarme"
+            texto = f"⏰  {al['hora']}    {nome}    •    {REPETICOES.get(al['repeticao'], '')}"
+            item = QListWidgetItem(texto)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if al["ativo"] else Qt.CheckState.Unchecked)
+            self.lista.addItem(item)
+        self._reconstruindo = False
+
+    def _item_mudou(self, item: QListWidgetItem):
+        if self._reconstruindo:
+            return
+        linha = self.lista.row(item)
+        if 0 <= linha < len(self.cfg["alarmes"]):
+            self.cfg["alarmes"][linha]["ativo"] = item.checkState() == Qt.CheckState.Checked
+            salvar_config(self.cfg)
+
+    def _adicionar(self):
+        self.cfg["alarmes"].append({
+            "hora": self.hora.time().toString("HH:mm"),
+            "rotulo": self.rotulo.text().strip(),
+            "repeticao": self.repeticao.currentData(),
+            "ativo": True,
+        })
+        self.cfg["alarmes"].sort(key=lambda a: a["hora"])
+        salvar_config(self.cfg)
+        self.rotulo.clear()
+        self._recarregar()
+
+    def _remover(self):
+        linha = self.lista.currentRow()
+        if 0 <= linha < len(self.cfg["alarmes"]):
+            del self.cfg["alarmes"][linha]
+            salvar_config(self.cfg)
+            self._recarregar()
+
+    def _on_tick(self, agora: datetime):
+        minuto = agora.strftime("%Y-%m-%d %H:%M")
+        if minuto != self._ultimo_minuto:  # verifica uma vez por minuto
+            self._ultimo_minuto = minuto
+            hhmm = agora.strftime("%H:%M")
+            mudou = False
+            for al in self.cfg["alarmes"]:
+                if not al["ativo"] or al["hora"] != hhmm:
+                    continue
+                if al["repeticao"] == "uteis" and agora.weekday() >= 5:
+                    continue
+                self._disparar(al["rotulo"] or "Alarme", hhmm)
+                if al["repeticao"] == "uma_vez":
+                    al["ativo"] = False
+                    mudou = True
+            if mudou:
+                salvar_config(self.cfg)
+                self._recarregar()
+
+        for item in [s for s in self._sonecas if agora >= s[0]]:
+            self._sonecas.remove(item)
+            self._disparar(item[1], agora.strftime("%H:%M"))
+
+    def _disparar(self, titulo: str, hora: str):
+        dlg = DialogoAlarme("⏰ Alarme", f"{titulo}\n{hora}", com_soneca=True, parent=self)
+        dlg.soneca_pedida.connect(lambda _=None, t=titulo: self._agendar_soneca(t))
+        abrir_dialogo(dlg)
+
+    def _agendar_soneca(self, titulo: str):
+        quando = datetime.now() + timedelta(minutes=self.soneca.value())
+        self._sonecas.append((quando, titulo))
+
+
+class AbaCronometro(QWidget):
+    def __init__(self):
+        super().__init__()
+        self._acumulado = 0.0
+        self._inicio: float | None = None
+        self._ultimo_parcial = 0.0
+        self._voltas = 0
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(30)
+        self._timer.timeout.connect(self._atualizar)
+
+        raiz = QVBoxLayout(self)
+        raiz.setContentsMargins(30, 24, 30, 24)
+        raiz.setSpacing(14)
+
+        self.display = QLabel("00:00.00")
+        self.display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fonte = QFont("Consolas", 64)
+        fonte.setBold(True)
+        self.display.setFont(fonte)
+        raiz.addWidget(self.display)
+
+        botoes = QHBoxLayout()
+        self.btn_iniciar = QPushButton("Iniciar")
+        self.btn_iniciar.setObjectName("primario")
+        self.btn_iniciar.setMinimumWidth(130)
+        self.btn_iniciar.clicked.connect(self._alternar)
+        btn_volta = QPushButton("Volta (lap)")
+        btn_volta.clicked.connect(self._volta)
+        btn_zerar = QPushButton("Zerar")
+        btn_zerar.clicked.connect(self._zerar)
+        botoes.addStretch(1)
+        for b in (self.btn_iniciar, btn_volta, btn_zerar):
+            botoes.addWidget(b)
+        botoes.addStretch(1)
+        raiz.addLayout(botoes)
+
+        self.lista = QListWidget()
+        raiz.addWidget(self.lista, 1)
+
+    def _decorrido(self) -> float:
+        if self._inicio is None:
+            return self._acumulado
+        return self._acumulado + (time.perf_counter() - self._inicio)
+
+    def _atualizar(self):
+        self.display.setText(formata_cronometro(self._decorrido()))
+
+    def _alternar(self):
+        if self._inicio is None:
+            self._inicio = time.perf_counter()
+            self._timer.start()
+            self.btn_iniciar.setText("Pausar")
+        else:
+            self._acumulado = self._decorrido()
+            self._inicio = None
+            self._timer.stop()
+            self.btn_iniciar.setText("Continuar")
+        self._atualizar()
+
+    def _volta(self):
+        total = self._decorrido()
+        if total <= 0:
+            return
+        self._voltas += 1
+        parcial = total - self._ultimo_parcial
+        self._ultimo_parcial = total
+        self.lista.insertItem(
+            0,
+            f"Volta {self._voltas:02d}    total {formata_cronometro(total)}    parcial {formata_cronometro(parcial)}",
+        )
+
+    def _zerar(self):
+        self._timer.stop()
+        self._acumulado = 0.0
+        self._inicio = None
+        self._ultimo_parcial = 0.0
+        self._voltas = 0
+        self.lista.clear()
+        self.btn_iniciar.setText("Iniciar")
+        self._atualizar()
+
+
+class AbaTemporizador(QWidget):
+    def __init__(self, cfg: dict):
+        super().__init__()
+        self.cfg = cfg
+        self._restante = 0.0
+        self._fim: float | None = None  # instante (perf_counter) em que termina
+        self._pomodoro = False
+        self._fase = "Trabalho"
+        self._sessoes = 0
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(100)
+        self._timer.timeout.connect(self._tick)
+
+        raiz = QVBoxLayout(self)
+        raiz.setContentsMargins(30, 24, 30, 24)
+        raiz.setSpacing(14)
+
+        self.display = QLabel("00:00:00")
+        self.display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fonte = QFont("Consolas", 64)
+        fonte.setBold(True)
+        self.display.setFont(fonte)
+        self.estado = QLabel("")
+        self.estado.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.estado.setStyleSheet(f"color: {COR_MUTED}; font-size: 11pt;")
+        raiz.addWidget(self.display)
+        raiz.addWidget(self.estado)
+
+        # Entrada manual
+        manual = QHBoxLayout()
+        self.sp_h = QSpinBox()
+        self.sp_h.setRange(0, 23)
+        self.sp_h.setSuffix(" h")
+        self.sp_m = QSpinBox()
+        self.sp_m.setRange(0, 59)
+        self.sp_m.setSuffix(" min")
+        self.sp_m.setValue(10)
+        self.sp_s = QSpinBox()
+        self.sp_s.setRange(0, 59)
+        self.sp_s.setSuffix(" s")
+        for sp in (self.sp_h, self.sp_m, self.sp_s):
+            sp.valueChanged.connect(self._ajuste_manual)
+            manual.addWidget(sp)
+        manual.addStretch(1)
+
+        # Controles
+        controles = QHBoxLayout()
+        self.btn_play = QPushButton("Iniciar")
+        self.btn_play.setObjectName("primario")
+        self.btn_play.setMinimumWidth(130)
+        self.btn_play.clicked.connect(self._play)
+        btn_zerar = QPushButton("Zerar")
+        btn_zerar.clicked.connect(self._zerar)
+        controles.addStretch(1)
+        controles.addWidget(self.btn_play)
+        controles.addWidget(btn_zerar)
+        controles.addStretch(1)
+
+        # Atalhos
+        atalhos = QHBoxLayout()
+        atalhos.addWidget(QLabel("Atalhos:"))
+        for minutos in (1, 5, 10, 15, 25, 45):
+            b = QPushButton(f"{minutos} min")
+            b.clicked.connect(lambda _=False, m=minutos: self._preset(m))
+            atalhos.addWidget(b)
+        atalhos.addStretch(1)
+
+        # Pomodoro
+        pomo = QHBoxLayout()
+        self.btn_pomo = QPushButton("🍅 Iniciar Pomodoro")
+        self.btn_pomo.clicked.connect(self._alternar_pomodoro)
+        pomo.addWidget(self.btn_pomo)
+        pomo.addSpacing(20)
+        pomo.addWidget(QLabel("Foco:"))
+        pomo.addWidget(self._spin_pomo("trabalho", 1, 180, "min"))
+        pomo.addWidget(QLabel("Pausa:"))
+        pomo.addWidget(self._spin_pomo("pausa", 1, 60, "min"))
+        pomo.addStretch(1)
+
+        raiz.addLayout(manual)
+        raiz.addLayout(controles)
+        raiz.addLayout(atalhos)
+        raiz.addSpacing(10)
+        raiz.addLayout(pomo)
+        raiz.addStretch(1)
+
+        self._zerar()
+
+
+    def _spin_pomo(self, chave: str, minimo: int, maximo: int, sufixo: str) -> QSpinBox:
+        sp = QSpinBox()
+        sp.setRange(minimo, maximo)
+        sp.setSuffix(f" {sufixo}")
+        sp.setValue(int(self.cfg["pomodoro"][chave]))
+        sp.valueChanged.connect(lambda v, k=chave: self._salvar_pomo(k, v))
+        return sp
+
+    def _salvar_pomo(self, chave: str, valor: int):
+        self.cfg["pomodoro"][chave] = int(valor)
+        salvar_config(self.cfg)
+
+    def _duracao_manual(self) -> float:
+        return self.sp_h.value() * 3600 + self.sp_m.value() * 60 + self.sp_s.value()
+
+    def _mostrar(self, segundos: float):
+        self.display.setText(formata_hms(segundos))
+
+    def _ajuste_manual(self, *_):
+        if self._fim is None and not self._pomodoro:
+            self._restante = self._duracao_manual()
+            self._mostrar(self._restante)
+
+    def _atualizar_estado(self):
+        if self._pomodoro:
+            self.estado.setText(f"🍅 {self._fase}   •   sessões de foco concluídas: {self._sessoes}")
+        else:
+            self.estado.setText("")
+
+
+    def _preset(self, minutos: int):
+        self.sp_h.setValue(minutos // 60)
+        self.sp_m.setValue(minutos % 60)
+        self.sp_s.setValue(0)
+        self._zerar()
+
+    def _zerar(self):
+        self._timer.stop()
+        self._fim = None
+        self._pomodoro = False
+        self._restante = self._duracao_manual()
+        self.btn_play.setText("Iniciar")
+        self.btn_pomo.setText("🍅 Iniciar Pomodoro")
+        self._atualizar_estado()
+        self._mostrar(self._restante)
+
+    def _correr(self):
+        self._fim = time.perf_counter() + self._restante
+        self._timer.start()
+
+    def _play(self):
+        if self._fim is not None:  # está rodando → pausa
+            self._restante = max(0.0, self._fim - time.perf_counter())
+            self._fim = None
+            self._timer.stop()
+            self.btn_play.setText("Continuar")
+            self._mostrar(self._restante)
+            return
+        if self._restante <= 0:
+            self._restante = self._duracao_manual()
+        if self._restante <= 0:
+            return
+        self._correr()
+        self.btn_play.setText("Pausar")
+
+    def _tick(self):
+        restante = self._fim - time.perf_counter()
+        if restante > 0:
+            self._mostrar(restante)
+            return
+        self._timer.stop()
+        self._fim = None
+        self._restante = 0.0
+        self._mostrar(0)
+        self._terminou()
+
+    def _terminou(self):
+        if self._pomodoro:
+            self._proxima_fase()
+        else:
+            self.btn_play.setText("Iniciar")
+            abrir_dialogo(DialogoAlarme("⏲ Temporizador", "Tempo esgotado!", com_soneca=False, parent=self))
+
+    def _alternar_pomodoro(self):
+        if self._pomodoro:
+            self._zerar()
+            return
+        self._pomodoro = True
+        self._fase = "Trabalho"
+        self._sessoes = 0
+        self._restante = self.cfg["pomodoro"]["trabalho"] * 60.0
+        self._atualizar_estado()
+        self._correr()
+        self.btn_play.setText("Pausar")
+        self.btn_pomo.setText("⏹ Parar Pomodoro")
+
+    def _proxima_fase(self):
+        p = self.cfg["pomodoro"]
+        if self._fase == "Trabalho":
+            self._sessoes += 1
+            if self._sessoes % p["ciclos"] == 0:
+                self._fase, minutos = "Pausa longa", p["pausa_longa"]
+            else:
+                self._fase, minutos = "Pausa", p["pausa"]
+        else:
+            self._fase, minutos = "Trabalho", p["trabalho"]
+        self._restante = minutos * 60.0
+        self._atualizar_estado()
+        abrir_dialogo(DialogoAlarme("🍅 Pomodoro", f"Agora: {self._fase} ({minutos} min)",
+                                    com_soneca=False, parent=self))
+        self._correr()
+
+
+class AbaCalendario(QWidget):
+    def __init__(self, pulso: Pulso):
+        super().__init__()
+        hoje = date.today()
+
+        raiz = QHBoxLayout(self)
+        raiz.setContentsMargins(24, 20, 24, 20)
+        raiz.setSpacing(24)
+
+        self.cal = QCalendarWidget()
+        self.cal.setLocale(QLocale(QLocale.Language.Portuguese, QLocale.Country.Brazil))
+        self.cal.setGridVisible(True)
+        self.cal.setNavigationBarVisible(True)
+        self.cal.setHorizontalHeaderFormat(QCalendarWidget.HorizontalHeaderFormat.ShortDayNames)
+        self.cal.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+        self._marcar_feriados(range(hoje.year - 1, hoje.year + 4))
+        raiz.addWidget(self.cal, 3)
+
+        painel = QVBoxLayout()
+        painel.setSpacing(8)
+        self.titulo = QLabel()
+        fonte = QFont("Segoe UI", 18)
+        fonte.setBold(True)
+        self.titulo.setFont(fonte)
+        self.titulo.setWordWrap(True)
+        self.detalhes = QLabel()
+        self.detalhes.setStyleSheet(f"color: {COR_MUTED};")
+        self.detalhes.setWordWrap(True)
+        self.rotulo_feriados = QLabel()
+        self.rotulo_feriados.setStyleSheet("font-weight: bold; margin-top: 12px;")
+        self.lista = QListWidget()
+        painel.addWidget(self.titulo)
+        painel.addWidget(self.detalhes)
+        painel.addWidget(self.rotulo_feriados)
+        painel.addWidget(self.lista, 1)
+        raiz.addLayout(painel, 2)
+
+        self.cal.selectionChanged.connect(self._atualizar_info)
+        self._atualizar_info()
+
+    def _marcar_feriados(self, anos):
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(COR_FERIADO))
+        fmt.setFontWeight(700)
+        for ano in anos:
+            for dia in feriados_nacionais(ano):
+                self.cal.setDateTextFormat(QDate(dia.year, dia.month, dia.day), fmt)
+
+    def _atualizar_info(self):
+        q = self.cal.selectedDate()
+        dia = date(q.year(), q.month(), q.day())
+        hoje = date.today()
+        feriados = feriados_nacionais(dia.year)
+
+        self.titulo.setText(f"{DIAS_SEMANA[dia.weekday()].capitalize()}, {dia.day} de "
+                            f"{MESES[dia.month - 1]} de {dia.year}")
+
+        partes = [f"dia {dia.timetuple().tm_yday} do ano", f"semana ISO {dia.isocalendar().week}"]
+        delta = (dia - hoje).days
+        if delta == 0:
+            partes.append("é hoje")
+        elif delta > 0:
+            partes.append(f"faltam {delta} dia{'s' if delta != 1 else ''}")
+        else:
+            partes.append(f"há {-delta} dia{'s' if delta != -1 else ''}")
+        if dia in feriados:
+            partes.append(f"🎉 {feriados[dia]}")
+        self.detalhes.setText("  •  ".join(partes))
+
+        self.rotulo_feriados.setText(f"Feriados de {dia.year}")
+        self.lista.clear()
+        for d, nome in sorted(feriados.items()):
+            self.lista.addItem(f"{d:%d/%m}  ({DIAS_CURTOS[d.weekday()]})  —  {nome}")
+
+
+class MiniRelogio(QWidget):
+    def __init__(self, pulso: Pulso, ao_restaurar):
+        super().__init__()
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint
+                            | Qt.WindowType.WindowStaysOnTopHint
+                            | Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet("background: transparent;")
+        self.setFixedSize(240, 112)
+        self.setToolTip("Arraste para mover • duplo clique para voltar à janela principal")
+        self._ao_restaurar = ao_restaurar
+        self._arrasto = None
+
+        raiz = QVBoxLayout(self)
+        raiz.setContentsMargins(14, 12, 14, 12)
+        raiz.setSpacing(0)
+
+        self.hora = QLabel("00:00:00")
+        self.hora.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fonte = QFont("Consolas", 30)
+        fonte.setBold(True)
+        self.hora.setFont(fonte)
+
+        self.data = QLabel("")
+        self.data.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.data.setStyleSheet(f"color: {COR_MUTED}; font-size: 9pt;")
+
+        raiz.addWidget(self.hora)
+        raiz.addWidget(self.data)
+        pulso.tick.connect(self._on_tick)
+
+    def _on_tick(self, agora: datetime):
+        self.hora.setText(agora.strftime("%H:%M:%S"))
+        self.data.setText(f"{DIAS_CURTOS[agora.weekday()]}  •  {agora.day:02d}/{agora.month:02d}/{agora.year}")
+
+    def paintEvent(self, _evento):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(caneta("#30363d", 1))
+        p.setBrush(QColor(13, 17, 23, 235))
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 18, 18)
+        p.end()
+
+    def mousePressEvent(self, evento):
+        if evento.button() == Qt.MouseButton.LeftButton:
+            self._arrasto = evento.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, evento):
+        if self._arrasto is not None and evento.buttons() & Qt.MouseButton.LeftButton:
+            self.move(evento.globalPosition().toPoint() - self._arrasto)
+
+    def mouseReleaseEvent(self, _evento):
+        self._arrasto = None
+
+    def mouseDoubleClickEvent(self, _evento):
+        self._ao_restaurar()
+
+    def contextMenuEvent(self, evento):
+        menu = QMenu(self)
+        menu.addAction("Restaurar janela principal").triggered.connect(lambda _=False: self._ao_restaurar())
+        menu.addAction("Sair").triggered.connect(lambda _=False: QApplication.quit())
+        menu.exec(evento.globalPos())
+
+class JanelaPrincipal(QMainWindow):
+    def __init__(self, pulso: Pulso, cfg: dict):
+        super().__init__()
+        self.setWindowTitle("Relógio T100 Ultra 3")
+        self.resize(1120, 740)
+        self.setMinimumSize(940, 660)
+
+        abas = QTabWidget()
+        abas.setDocumentMode(True)
+        abas.addTab(AbaRelogio(pulso), "🕒  Relógio")
+        abas.addTab(AbaMundo(pulso, cfg), "🌍  Mundo")
+        abas.addTab(AbaAlarmes(pulso, cfg), "⏰  Alarmes")
+        abas.addTab(AbaCronometro(), "⏱  Cronômetro")
+        abas.addTab(AbaTemporizador(cfg), "⏳  Temporizador")
+        abas.addTab(AbaCalendario(pulso), "📅  Calendário")
+        self.setCentralWidget(abas)
+
+        botao_compacto = QPushButton("⧉  Modo compacto")
+        botao_compacto.clicked.connect(self._ir_compacto)
+        abas.setCornerWidget(botao_compacto, Qt.Corner.TopRightCorner)
+
+        self._mini = MiniRelogio(pulso, self._restaurar)
+        self.statusBar().showMessage(f"Configurações salvas em: {CONFIG_FILE}")
+
+    def _ir_compacto(self):
+        self.hide()
+        self._mini.show()
+
+    def _restaurar(self):
+        self._mini.hide()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+
+def main() -> int:
+    app = QApplication(sys.argv)
+    app.setApplicationName("Relógio T100 Ultra 3")
+    app.setStyle("Fusion")
+    app.setStyleSheet(QSS)
+
+    cfg = carregar_config()
+    pulso = Pulso()  # mantém a referência viva durante toda a execução
+    janela = JanelaPrincipal(pulso, cfg)
+    janela.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
